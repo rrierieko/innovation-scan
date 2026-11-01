@@ -1,0 +1,80 @@
+<!doctype html>
+<!-- v17.60(11-01): LINE の中で 札(QR)を 続けて 何枚も読む画面。GitHub Pages に このファイル1つだけ置く(LIFF のエンドポイント)。
+     台帳(GAS)の doPost api liffcheck / liffdone と やりとりする(連続読み.js)。合言葉は入れない(LINE の IDトークンで 本人を確かめる) -->
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>札を 続けて読む</title>
+<script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<style>body{margin:0;font-family:"Hiragino Sans","Yu Gothic UI",sans-serif;font-size:18px;color:#222;background:#f4f1ea}
+h1{font-size:21px;margin:0;padding:14px 16px;background:#06c755;color:#fff}.box{padding:14px 16px}
+.big{display:block;width:100%;font-size:22px;font-weight:700;padding:18px 10px;border-radius:12px;border:0;margin:10px 0;box-sizing:border-box}
+.scan{background:#1a5fb4;color:#fff}.done{background:#06c755;color:#fff}.stop{background:#ddd;color:#333;font-size:17px;padding:12px}
+.big:disabled{opacity:.45}.row{background:#fff;border-radius:10px;padding:10px 12px;margin:8px 0;border:2px solid #cfe9d6}.row.ng{border-color:#e7a99e;background:#fff4f2}
+.row b{font-size:18px}.row small{display:block;color:#555}.msg{font-size:17px;line-height:1.6}.err{color:#b3200f;font-weight:700}.cnt{font-size:20px;font-weight:700;margin:6px 0}</style></head>
+<body><h1 id="ttl">📷 札を 続けて読む</h1><div class="box">
+<div id="msg" class="msg">開いています…</div>
+<button id="scan" class="big scan" disabled>📷 札を読む(続けて)</button>
+<div id="cnt" class="cnt"></div><div id="list"></div>
+<button id="done" class="big done" disabled>✅ 読み終わった</button>
+<button id="stop" class="big stop">やめる(画面を とじる)</button>
+</div><script>
+var LIFF_ID = '2012318286-DaK7RzjC';
+var API = 'https://script.google.com/macros/s/AKfycbwWW_m3tVdvQZ4aspJzzkYOPQVoCwqdncgv0gohBuEos9oNW867aJ_JDJAC0xXWru-0/exec';
+var MODE = 'w', NAME = '払い出す', TOKEN = '', rows = [], busy = false;
+function $(i) { return document.getElementById(i); }
+function esc(s) { return String(s || '').replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+function say(t, err) { $('msg').innerHTML = (err ? '<span class="err">⚠ ' : '') + t + (err ? '</span>' : ''); }   // t は esc 済みか 決まった文だけ
+function post(body) {   // 台帳へ(text/plain = 余計な 前問い合わせ なし)
+  return fetch(API, { method: 'POST', body: JSON.stringify(body) }).then(function (r) { return r.json(); });
+}
+function draw() {
+  var ok = rows.filter(function (r) { return r.ok; }).length;
+  $('cnt').textContent = rows.length ? '読んだ札 ' + ok + '枚' + (rows.length > ok ? '(入れない札 ' + (rows.length - ok) + '枚)' : '') : '';
+  $('list').innerHTML = rows.slice().reverse().map(function (r) { return '<div class="row' + (r.ok ? '' : ' ng') + '"><b>' + (r.ok ? '✔ ' : '⚠ ') + esc(r.hin || r.no || '札') + '</b>' + (r.ok ? ' ' + esc(r.q) + '個' + (r.who ? '(' + esc(r.who) + 'さんの分)' : '') : '<small>' + esc(r.msg) + '</small>') + '</div>'; }).join('');
+  $('done').disabled = busy || !ok; $('done').textContent = '✅ 読み終わった(' + ok + '枚)';
+  $('scan').disabled = busy || !TOKEN;
+}
+function check(raw) {
+  return post({ api: 'liffcheck', t: TOKEN, m: MODE, raw: raw }).catch(function (e) { return { ok: false, msg: '台帳に つながりませんでした(' + (e.message || e) + ')' }; });
+}
+async function loop() {
+  if (busy) return;
+  busy = true; draw();
+  while (true) {
+    var r;
+    try { r = await liff.scanCodeV2(); } catch (e) { say('読み取りが 止まりました(' + esc(e.message || e) + ')。もう一度「📷 札を読む」を 押してください。', true); break; }
+    if (!r || !r.value) break;   // 読み取りを とじた
+    if (rows.some(function (x) { return x.raw === r.value; })) { say('⏭ この札は もう 読みました。次の札を 読みます。'); continue; }
+    var row = { raw: r.value, ok: false, msg: '確かめています…' }; rows.push(row); draw();
+    var c = await check(r.value);
+    row.ok = !!c.ok; row.no = c.no; row.hin = c.hin; row.q = c.q; row.who = c.who; row.msg = c.msg;
+    if (c.ok && rows.some(function (x) { return x !== row && x.ok && x.no === c.no; })) { row.ok = false; row.msg = 'もう 読みました'; }
+    draw();
+    say(row.ok ? '✔ ' + esc(row.hin) + '。続けて 次の札を 読みます。' : '⚠ ' + esc(row.msg) + '(この札は 入れません)。続けて 次の札を 読みます。');
+  }
+  busy = false; draw();
+  if (rows.some(function (x) { return x.ok; })) say('読み終わったら 緑の「✅ 読み終わった」を 押します。まだある時は「📷 札を読む」。');
+}
+$('scan').onclick = loop;
+$('stop').onclick = function () { try { liff.closeWindow(); } catch (e) { say('右上の ✕ で とじてください。'); } };
+$('done').onclick = function () {
+  var raws = rows.filter(function (r) { return r.ok; }).map(function (r) { return r.raw; });
+  if (!raws.length) return;
+  busy = true; draw(); say('台帳に 送っています…');
+  post({ api: 'liffdone', t: TOKEN, m: MODE, raws: raws }).then(function (j) {
+    if (!j || !j.ok) { busy = false; draw(); say(esc((j && j.error) || '送れませんでした。もう一度 押してください。'), true); return; }
+    say('✅ ' + esc(j.n) + '枚 送りました。LINE に 続きが 届きます(だれに → 作業 → 納期)。この画面は とじます。');
+    setTimeout(function () { try { liff.closeWindow(); } catch (e) {} }, 1800);
+  }).catch(function (e) { busy = false; draw(); say('送れませんでした(' + esc(e.message || e) + ')。もう一度 押してください。', true); });
+};
+liff.init({ liffId: LIFF_ID }).then(function () {
+  var m = new URLSearchParams(location.search).get('m');
+  if (m === 'u' || m === 'r' || m === 'w') MODE = m;
+  NAME = { w: '払い出す', u: '受け取る', r: '引き継ぐ' }[MODE];
+  $('ttl').textContent = '📷 札を 続けて読む(' + NAME + ')';
+  if (!liff.isInClient()) { say('LINE の中で 開いてください(LINE の ボタンから 開きます)。', true); return; }
+  TOKEN = liff.getIDToken() || '';
+  if (!TOKEN) { say('LINE の 確かめが できませんでした。画面を とじて、もう一度 開いてください。', true); return; }
+  say('「📷 札を読む」を 押すと 読み取りが 開きます。札を 続けて かざすだけで 何枚も 読めます(1枚ごとに 送信は いりません)。<br>読み取りを とじると 止まります。');
+  draw(); loop();
+}).catch(function (e) { say('画面を 開けませんでした(' + esc(e.code || '') + ' ' + esc(e.message || e) + ')。清原へ この画面の スクショを 送ってください。', true); });
+</script></body></html>
