@@ -1,27 +1,36 @@
 <!doctype html>
 <!-- v17.60(11-01): LINE の中で 札(QR)を 続けて 何枚も読む画面。GitHub Pages に このファイル1つだけ置く(LIFF のエンドポイント)。
-     台帳(GAS)の doPost api liffcheck / liffdone と やりとりする(連続読み.js)。合言葉は入れない(LINE の IDトークンで 本人を確かめる) -->
+     台帳(GAS)の doPost api liffcheck / liffdone と やりとりする(連続読み.js)。合言葉は入れない(LINE の IDトークンで 本人を確かめる)
+     v17.61(11-01 rieko「QRコードを読み取ってくれない」Android): LINE の読み取り(liff.scanCodeV2)は 札の 細かい QR を 拾えなかった →
+     画面の中で カメラを 開いたままにして 読む(BarcodeDetector か jsQR)。札を かざすだけで 次々に読む。LINE の読み取りは 予備のボタン -->
 <html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>札を 続けて読む</title>
 <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 <style>body{margin:0;font-family:"Hiragino Sans","Yu Gothic UI",sans-serif;font-size:18px;color:#222;background:#f4f1ea}
-h1{font-size:21px;margin:0;padding:14px 16px;background:#06c755;color:#fff}.box{padding:14px 16px}
-.big{display:block;width:100%;font-size:22px;font-weight:700;padding:18px 10px;border-radius:12px;border:0;margin:10px 0;box-sizing:border-box}
-.scan{background:#1a5fb4;color:#fff}.done{background:#06c755;color:#fff}.stop{background:#ddd;color:#333;font-size:17px;padding:12px}
-.big:disabled{opacity:.45}.row{background:#fff;border-radius:10px;padding:10px 12px;margin:8px 0;border:2px solid #cfe9d6}.row.ng{border-color:#e7a99e;background:#fff4f2}
-.row b{font-size:18px}.row small{display:block;color:#555}.msg{font-size:17px;line-height:1.6}.err{color:#b3200f;font-weight:700}.cnt{font-size:20px;font-weight:700;margin:6px 0}</style></head>
+h1{font-size:20px;margin:0;padding:12px 16px;background:#06c755;color:#fff}.box{padding:10px 14px}
+.cam{position:relative;background:#000;border-radius:12px;overflow:hidden}.cam video{display:block;width:100%;max-height:46vh;object-fit:cover}
+.cam .aim{position:absolute;left:18%;top:12%;width:64%;height:76%;border:4px solid rgba(255,255,255,.85);border-radius:12px;box-shadow:0 0 0 999px rgba(0,0,0,.25)}
+.cam .flash{position:absolute;inset:0;background:rgba(6,199,85,.45);opacity:0;transition:opacity .25s}.cam .flash.on{opacity:1}
+.big{display:block;width:100%;font-size:21px;font-weight:700;padding:16px 10px;border-radius:12px;border:0;margin:10px 0;box-sizing:border-box}
+.done{background:#06c755;color:#fff}.alt{background:#1a5fb4;color:#fff;font-size:17px;padding:12px}.stop{background:#ddd;color:#333;font-size:17px;padding:12px}
+.big:disabled{opacity:.45}.row{background:#fff;border-radius:10px;padding:9px 12px;margin:7px 0;border:2px solid #cfe9d6}.row.ng{border-color:#e7a99e;background:#fff4f2}
+.row b{font-size:18px}.row small{display:block;color:#555}.msg{font-size:17px;line-height:1.6;margin:8px 0}.err{color:#b3200f;font-weight:700}.cnt{font-size:20px;font-weight:700;margin:6px 0}</style></head>
 <body><h1 id="ttl">📷 札を 続けて読む</h1><div class="box">
+<div class="cam" id="camw" style="display:none"><video id="v" playsinline muted autoplay></video><div class="aim"></div><div class="flash" id="flash"></div></div>
 <div id="msg" class="msg">開いています…</div>
-<button id="scan" class="big scan" disabled>📷 札を読む(続けて)</button>
-<div id="cnt" class="cnt"></div><div id="list"></div>
 <button id="done" class="big done" disabled>✅ 読み終わった</button>
+<div id="cnt" class="cnt"></div><div id="list"></div>
+<button id="alt" class="big alt" disabled>読めない時: LINE の読み取りで読む</button>
 <button id="stop" class="big stop">やめる(画面を とじる)</button>
+<canvas id="c" style="display:none"></canvas>
 </div><script>
 var LIFF_ID = '2012318286-DaK7RzjC';
 var API = 'https://script.google.com/macros/s/AKfycbwWW_m3tVdvQZ4aspJzzkYOPQVoCwqdncgv0gohBuEos9oNW867aJ_JDJAC0xXWru-0/exec';
 var MODE = 'w', NAME = '払い出す', TOKEN = '', rows = [], busy = false;
+var stream = null, scanning = false, det = null, decoding = false, lastRaw = '', lastAt = 0;
 function $(i) { return document.getElementById(i); }
-function esc(s) { return String(s || '').replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
 function say(t, err) { $('msg').innerHTML = (err ? '<span class="err">⚠ ' : '') + t + (err ? '</span>' : ''); }   // t は esc 済みか 決まった文だけ
 function post(body) {   // 台帳へ(text/plain = 余計な 前問い合わせ なし)
   return fetch(API, { method: 'POST', body: JSON.stringify(body) }).then(function (r) { return r.json(); });
@@ -31,40 +40,83 @@ function draw() {
   $('cnt').textContent = rows.length ? '読んだ札 ' + ok + '枚' + (rows.length > ok ? '(入れない札 ' + (rows.length - ok) + '枚)' : '') : '';
   $('list').innerHTML = rows.slice().reverse().map(function (r) { return '<div class="row' + (r.ok ? '' : ' ng') + '"><b>' + (r.ok ? '✔ ' : '⚠ ') + esc(r.hin || r.no || '札') + '</b>' + (r.ok ? ' ' + esc(r.q) + '個' + (r.who ? '(' + esc(r.who) + 'さんの分)' : '') : '<small>' + esc(r.msg) + '</small>') + '</div>'; }).join('');
   $('done').disabled = busy || !ok; $('done').textContent = '✅ 読み終わった(' + ok + '枚)';
-  $('scan').disabled = busy || !TOKEN;
+  $('alt').disabled = busy || !TOKEN;
 }
 function check(raw) {
   return post({ api: 'liffcheck', t: TOKEN, m: MODE, raw: raw }).catch(function (e) { return { ok: false, msg: '台帳に つながりませんでした(' + (e.message || e) + ')' }; });
 }
-async function loop() {
+// 1枚 読めた時(カメラでも LINE の読み取りでも)
+async function onCode(raw) {
+  var now = Date.now();
+  if (raw === lastRaw && now - lastAt < 4000) return;   // 同じ札を かざしたまま
+  lastRaw = raw; lastAt = now;
+  if (rows.some(function (x) { return x.raw === raw; })) { say('⏭ この札は もう 読みました。次の札を かざしてください。'); return; }
+  try { navigator.vibrate && navigator.vibrate(80); } catch (e) {}
+  $('flash').classList.add('on'); setTimeout(function () { $('flash').classList.remove('on'); }, 300);
+  var row = { raw: raw, ok: false, msg: '確かめています…' }; rows.push(row); draw();
+  var c = await check(raw);
+  row.ok = !!c.ok; row.no = c.no; row.hin = c.hin; row.q = c.q; row.who = c.who; row.msg = c.msg;
+  if (c.ok && rows.some(function (x) { return x !== row && x.ok && x.no === c.no; })) { row.ok = false; row.msg = 'もう 読みました'; }
+  draw();
+  say(row.ok ? '✔ ' + esc(row.hin) + '。次の札を かざしてください。終わったら 緑の「✅ 読み終わった」。' : '⚠ ' + esc(row.msg) + '(この札は 入れません)。次の札を かざしてください。');
+}
+// ---- 画面の中の カメラ ----
+async function camStart() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
+  } catch (e) { say('カメラが 開けませんでした(' + esc(e.name || e) + ')。下の「読めない時: LINE の読み取りで読む」を 押してください。', true); return; }
+  $('camw').style.display = ''; $('v').srcObject = stream;
+  try { await $('v').play(); } catch (e) {}
+  try { if ('BarcodeDetector' in window) det = new BarcodeDetector({ formats: ['qr_code'] }); } catch (e) { det = null; }
+  scanning = true; tick();
+  say('札の QR を、白い枠の中に かざすだけで 読みます(1枚ごとに 送信は いりません)。<br>終わったら 緑の「✅ 読み終わった」を 押します。');
+}
+function camStop() { scanning = false; try { stream && stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {} }
+async function decode() {
+  var v = $('v'), w = v.videoWidth, h = v.videoHeight;
+  if (!w || !h) return '';
+  if (det) { try { var r = await det.detect(v); if (r && r[0] && r[0].rawValue) return r[0].rawValue; } catch (e) { det = null; } }
+  if (typeof jsQR !== 'function') return '';
+  // まん中を そのままの細かさで 切り出して 読む(札の QR は 細かい)
+  var side = Math.round(Math.min(w, h) * 0.9), sx = Math.round((w - side) / 2), sy = Math.round((h - side) / 2), out = Math.min(side, 1000);
+  var cv = $('c'), cx = cv.getContext('2d', { willReadFrequently: true });
+  cv.width = out; cv.height = out;
+  cx.drawImage(v, sx, sy, side, side, 0, 0, out, out);
+  var q = jsQR(cx.getImageData(0, 0, out, out).data, out, out, { inversionAttempts: 'dontInvert' });
+  return q && q.data ? q.data : '';
+}
+async function tick() {
+  if (!scanning) return;
+  if (!decoding && !busy) {
+    decoding = true;
+    try { var val = await decode(); if (val) await onCode(val); } catch (e) {}
+    decoding = false;
+  }
+  setTimeout(tick, 120);
+}
+// ---- 予備: LINE の読み取り ----
+async function lineScan() {
   if (busy) return;
-  busy = true; draw();
+  camStop();
   while (true) {
     var r;
-    try { r = await liff.scanCodeV2(); } catch (e) { say('読み取りが 止まりました(' + esc(e.message || e) + ')。もう一度「📷 札を読む」を 押してください。', true); break; }
-    if (!r || !r.value) break;   // 読み取りを とじた
-    if (rows.some(function (x) { return x.raw === r.value; })) { say('⏭ この札は もう 読みました。次の札を 読みます。'); continue; }
-    var row = { raw: r.value, ok: false, msg: '確かめています…' }; rows.push(row); draw();
-    var c = await check(r.value);
-    row.ok = !!c.ok; row.no = c.no; row.hin = c.hin; row.q = c.q; row.who = c.who; row.msg = c.msg;
-    if (c.ok && rows.some(function (x) { return x !== row && x.ok && x.no === c.no; })) { row.ok = false; row.msg = 'もう 読みました'; }
-    draw();
-    say(row.ok ? '✔ ' + esc(row.hin) + '。続けて 次の札を 読みます。' : '⚠ ' + esc(row.msg) + '(この札は 入れません)。続けて 次の札を 読みます。');
+    try { r = await liff.scanCodeV2(); } catch (e) { say('LINE の読み取りが 止まりました(' + esc(e.message || e) + ')。', true); break; }
+    if (!r || !r.value) break;
+    await onCode(r.value);
   }
-  busy = false; draw();
-  if (rows.some(function (x) { return x.ok; })) say('読み終わったら 緑の「✅ 読み終わった」を 押します。まだある時は「📷 札を読む」。');
+  camStart();
 }
-$('scan').onclick = loop;
-$('stop').onclick = function () { try { liff.closeWindow(); } catch (e) { say('右上の ✕ で とじてください。'); } };
+$('alt').onclick = lineScan;
+$('stop').onclick = function () { camStop(); try { liff.closeWindow(); } catch (e) { say('右上の ✕ で とじてください。'); } };
 $('done').onclick = function () {
   var raws = rows.filter(function (r) { return r.ok; }).map(function (r) { return r.raw; });
   if (!raws.length) return;
-  busy = true; draw(); say('台帳に 送っています…');
+  busy = true; camStop(); draw(); say('台帳に 送っています…');
   post({ api: 'liffdone', t: TOKEN, m: MODE, raws: raws }).then(function (j) {
-    if (!j || !j.ok) { busy = false; draw(); say(esc((j && j.error) || '送れませんでした。もう一度 押してください。'), true); return; }
+    if (!j || !j.ok) { busy = false; draw(); camStart(); say(esc((j && j.error) || '送れませんでした。もう一度 押してください。'), true); return; }
     say('✅ ' + esc(j.n) + '枚 送りました。LINE に 続きが 届きます(だれに → 作業 → 納期)。この画面は とじます。');
     setTimeout(function () { try { liff.closeWindow(); } catch (e) {} }, 1800);
-  }).catch(function (e) { busy = false; draw(); say('送れませんでした(' + esc(e.message || e) + ')。もう一度 押してください。', true); });
+  }).catch(function (e) { busy = false; draw(); camStart(); say('送れませんでした(' + esc(e.message || e) + ')。もう一度 押してください。', true); });
 };
 liff.init({ liffId: LIFF_ID }).then(function () {
   var m = new URLSearchParams(location.search).get('m');
@@ -74,7 +126,6 @@ liff.init({ liffId: LIFF_ID }).then(function () {
   if (!liff.isInClient()) { say('LINE の中で 開いてください(LINE の ボタンから 開きます)。', true); return; }
   TOKEN = liff.getIDToken() || '';
   if (!TOKEN) { say('LINE の 確かめが できませんでした。画面を とじて、もう一度 開いてください。', true); return; }
-  say('「📷 札を読む」を 押すと 読み取りが 開きます。札を 続けて かざすだけで 何枚も 読めます(1枚ごとに 送信は いりません)。<br>読み取りを とじると 止まります。');
-  draw(); loop();
+  draw(); camStart();
 }).catch(function (e) { say('画面を 開けませんでした(' + esc(e.code || '') + ' ' + esc(e.message || e) + ')。清原へ この画面の スクショを 送ってください。', true); });
 </script></body></html>
